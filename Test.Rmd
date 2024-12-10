@@ -1,0 +1,475 @@
+---
+title: "Projekt z Analizy Danych: Analiza baterii"
+subtitle: "[Repozytorium](https://google.com)"
+author: "Piotr Marciniak"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: "show"
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Podsumowanie
+
+Analiza danych dotyczących baterii wykazała, że:
+ - Najpowszechniej występują baterie litowo-jonowe. Posiadają one bardzo korzystny współczynnik gęstości energetycznej do ich masy, co może przekładać się na ich popularność, gdyż mogą być stosowane w lekkich urządzeniach mobilnych.
+ - Atrybuty opisujące gęstość energii i pojemność względem masy i objęctości są silnie skorelowane.
+- Model liniowy nie daje satysfakcjonujących predykcji stabilności baterii.
+
+# Wykorzystane biblioteki
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggcorrplot)
+library(ggplot2)
+library(ggthemes)
+library(gridExtra)
+library(kableExtra)
+library(plotly)
+library(caret)
+```
+
+# Wczytanie danych
+
+Dane wczytane z pliku `mp.batteries.csv`.
+
+```{r read_data, cache=TRUE}
+df <- read.csv("mp_batteries.csv")
+```
+```{r display_data, echo=FALSE}
+knitr::kable(head(df)) %>% 
+  kableExtra::kable_styling() %>% 
+  kableExtra::scroll_box(width = "100%")
+```
+
+# Podsumowanie zbioru
+ 
+Zbiór zawiera dane o materiałach wykorzystywanych w bateriach. Uwzględnia ich skład chemiczny i parametry wydajnościowe.
+
+## Liczność zbioru
+Zbiór danych posiada:
+
+ - `r nrow(df)` wierszy
+ - `r ncol(df)` atrybutów
+ - `r sum(is.na(df))` Brakujących wartości
+ 
+## Atrybuty
+
+ - *Battery ID*: Identyfikator baterii.
+ - *Battery Formula*: Wzór chemiczny materiału baterii.
+ - *Working Ion*: Główny jon, który odpowiada za transport ładunku w baterii.
+ - *Formula Charge*: Wzór chemiczny materiału baterii w stanie naładowanym.
+ - *Formula Discharge*: Wzór chemiczny materiału baterii w stanie rozładowanym.
+ - *Max Delta Volume*: Zmiana objętości w % dla danego kroku napięcia za pomocą wzoru:
+max(charge, discharge)/min(charge, discharge) -1.
+ - *Average Voltage*: Średnie napięcie dla poszczególnego kroku napięcia.
+ - *Gravimetric Capacity*: Pojemność grawimetryczna, czyli ilość energii na jednostkę masy
+(mAh/g).
+ - *Volumetric Capacity*: Pojemność wolumetryczna, czyli ilość energii na jednostkę
+objętości (mAh/cm³).
+ - *Gravimetric Energy*: Gęstość energii w odniesieniu do masy baterii (Wh/kg).
+ - *Volumetric Energy*: Gęstość energii w odniesieniu do objętości baterii (Wh/L).
+ - *Atomic Fraction Charge*: Udział atomowy składników w stanie naładowanym.
+ - *Atomic Fraction Discharge*: Udział atomowy składników w stanie rozładowanym.
+ - *Stability Charge*: Wskaźnik stabilności materiału w stanie naładowanym.
+ - *Stability Discharge*: Wskaźnik stabilności materiału w stanie rozładowanym.
+ - *Steps*: Liczba odrębnych kroków napięcia od pełnego naładowania do rozładowania,
+oparta na stabilnych stanach pośrednich.
+ - *Max Voltage Step*: Maksymalna bezwzględna różnica między sąsiednimi krokami
+napięcia.
+
+
+*Źródło: ["Programowanie w R: Projekt - Wymagania"](https://ekursy.put.poznan.pl/pluginfile.php/1214601/mod_resource/content/7/Wymagania.pdf)*
+
+Podstawowe statystyki
+
+```{r display_data_stats, echo=FALSE, cache=TRUE}
+
+df_summary <- summary(df)
+unique_counts <- sapply(df, function(col) paste("Unique:", length(unique(col))) )
+df_summary <- rbind(df_summary, " " = unique_counts)
+  
+
+knitr::kable(df_summary) %>%
+  kableExtra::kable_styling() %>%
+  kableExtra::scroll_box(width = "100%")
+```
+ 
+# Czyszczenie i przegląd atrybutów
+
+```{r plot_box_hist_function, echo=FALSE, cache=TRUE}
+plot_box_hist <- function (dataframe, column_name){
+  unique_values <- length(unique(dataframe[[column_name]]))
+  num_bins <- min(unique_values, 20)
+  
+  plt_boxplot <- ggplot(dataframe, aes_string(y = column_name)) + 
+    geom_boxplot() + 
+    ylab(column_name)  +
+    theme_minimal()
+  plt_histogram <- ggplot(dataframe, aes_string(x = column_name)) + 
+    geom_histogram(bins = num_bins) + 
+    xlab(column_name)  +
+    theme_minimal()
+  
+  return(list(plt_boxplot, plt_histogram)) 
+}
+```
+
+## Atrybuty numeryczne
+
+W zbiorze występują następujące atrybuty numeryczne:
+
+```{r numeric_cols, echo=FALSE, fig.width=12, fig.height=15, cache=TRUE}
+numeric_columns <- sapply(df, is.numeric)
+numeric_columns_names <- colnames(df)[numeric_columns]
+
+plot_list <- list()
+for(col_name in numeric_columns_names){
+ plts <- plot_box_hist(df, col_name) 
+ plot_list <- append(plot_list, plts)
+}
+
+grid.arrange(grobs = plot_list, ncol = 4)
+
+```
+
+Jak widać dystrybucja atrybutów zawiera wiele outlierów ponad trzecim kwartylem. Można je usunąć. Wyjątkiem będzie kolumna Steps, ponieważ zawiera dyskretne wartości, których niektóre wartości występują zacząco rzadziej. Usunięcie outlierów na podstawie tego atrybutu może doprowadzić do utraty istotnych danych. Podobnie usuwnie
+ 
+```{r dataset_clean, cache=TRUE}
+outlier_detection_param = 3.2
+
+remove_outliers <- function(df, columns) { 
+  for (col in columns) { 
+    Q3 <- quantile(df[[col]], 0.75) 
+    IQR <- IQR(df[[col]])
+    threshold <- Q3 + outlier_detection_param * IQR
+    ret_df <- df[df[[col]] <= threshold, ] 
+  } 
+  return(ret_df) 
+}
+
+columns_to_clean <- setdiff(numeric_columns_names, c("Steps", "Max.Voltage.Step"))
+df_clean <-
+  remove_outliers(df, columns_to_clean) %>%
+  filter(
+     Max.Delta.Volume < 0.5,
+     Average.Voltage > -2, Average.Voltage  < 9,
+     Gravimetric.Energy < 2000,
+     Volumetric.Energy < 6500,
+     Volumetric.Capacity < 2000,
+     Atomic.Fraction.Charge < 0.4,
+     Stability.Charge < 0.6,
+     Max.Voltage.Step < 2
+  )
+    
+```
+
+Wybór outlierów do usunięcia polega na standardowej metodzie wykorzystującej trzeci kwartyl i rozstęp międzykwartylowy i usunięcia wierszy w których te outliery się znajdują. Analiza wykresów pudełkowych wskazuje, że outliery występują niemal wyłącznie w górnym przedziale wartośści atrybutów. Dlatego też do wykrywania outlierów wykorzystano następujący wzór:
+
+\[
+  O = \{x: \exists_{a \text{ jest atrybutem } x} a > Q3 + `r outlier_detection_param` * IQR \}
+\]
+
+Parametr `r outlier_detection_param` został dobrany tak, aby w zbiorze pozostało około 90% wierszy.
+
+Ponadto, dodatkowe pojedyncze outliery zostały usunięte poprzez ręczną analizę wykresów pudełkowych.
+
+Po usunięciu outlierów zbiór posiada `r nrow(df_clean)` wierszy, co stanowi `r round(100 * nrow(df_clean) / nrow(df))`% oryginalnego zbioru.
+
+```{r clean_dataset, echo=FALSE, fig.width=12, fig.height=15, cache=TRUE}
+plot_list <- list()
+for(col_name in numeric_columns_names){
+ plts <- plot_box_hist(df_clean, col_name) 
+ plot_list <- append(plot_list, plts)
+}
+
+grid.arrange(grobs = plot_list, ncol = 4)
+```
+ 
+## Atrybuty nominalne
+
+Atrybuty nominalne:
+
+```{r nominal_enum, results='asis', echo=FALSE, cache=TRUE}
+nominal_column_names <- setdiff(colnames(df), numeric_columns_names)
+for(colname in nominal_column_names){
+  num_unique <- length(unique(df_clean[[colname]]))
+  cat(paste(" - ", colname, " (", num_unique, " unikalnych wartości)\n", sep = ""))
+}
+
+nominal_column_names <- nominal_column_names[nominal_column_names != "Battery.ID"]
+```
+
+Tylko kolumna Working.Ion posiada liczbę unikalnych wartości która nadaje się do wizualizacji.
+
+```{r plot_nominal, echo=FALSE, fig.width=12, fig.height=5}
+column_name <- "Working.Ion"
+
+df_working_ion <- df_clean[column_name] %>% 
+  mutate(Working.Ion = factor(Working.Ion, 
+                              levels = names(sort(table(Working.Ion), 
+                                                  decreasing = TRUE))))
+
+ggplot(df_working_ion, aes_string(x = column_name)) + 
+    geom_bar() + 
+    xlab(column_name) +
+    ylab("Liczba wystąpień") + 
+    theme_minimal()
+```
+
+Zdecydowaną większość baterii w zbiorze stanowią baterie litowo-jonowe. 
+
+# Analiza atrybutów
+
+## Napięcie względem głównego jonu baterii
+
+```{r, echo=FALSE}
+  ggplotly(
+    ggplot(df_clean, aes(x = Working.Ion, y = Average.Voltage)) + 
+        geom_boxplot() + 
+        theme_minimal()
+  )
+```
+
+## Pojemność względem głównego jonu baterii
+
+```{r, echo=FALSE}
+  gg_cap_ion <- ggplotly(
+    ggplot(df_clean, aes(x = Gravimetric.Capacity, y = Volumetric.Capacity, color=Working.Ion)) + 
+        geom_point() + 
+        theme_minimal()
+  )
+  visible_ions <- c("Li", "Y", "Zn") 
+  gg_cap_ion$x$data <- lapply(gg_cap_ion$x$data, function(trace) {
+    trace$visible <- ifelse(trace$name %in% visible_ions, TRUE, "legendonly")
+    trace 
+  })
+  
+  gg_cap_ion
+```
+
+Można zauważyć, że ogniwa litowo-jonowe charakteryzują się średnio większą pojemnością na jednostkę masy (są lekkie), a cynkowe i itrowe mają korzystniejszy stosunek objętości do pojemności (są mniejsze).  
+
+## Energia względem głównego jonu baterii
+
+```{r, echo=FALSE}
+  gg_cap_ion <- ggplotly(
+    ggplot(df_clean, aes(x = Gravimetric.Energy, y = Volumetric.Energy, color=Working.Ion)) + 
+        geom_point() + 
+        theme_minimal()
+  )
+  visible_ions <- c("Li", "Y", "Zn") 
+  gg_cap_ion$x$data <- lapply(gg_cap_ion$x$data, function(trace) {
+    trace$visible <- ifelse(trace$name %in% visible_ions, TRUE, "legendonly")
+    trace
+  })
+  
+  gg_cap_ion
+```
+
+Bardzo podobną zależność można zauważyć jeśli chodzi o energię baterii. Litowe posiadają więcej energii wziędem jednostki masy, a cynkowe i itrowe względem objętości.
+
+Można rówież zauważyć, że wszystkie cztery atrybuty posiadają silną korelację ze sobą.
+
+
+## Wskaźniki stabilności względem głównego jonu baterii
+
+```{r, echo=FALSE}
+  gg_cap_ion <- ggplotly(
+    ggplot(df_clean, aes(x = Stability.Charge, y = Stability.Discharge, color=Working.Ion)) + 
+        geom_point() + 
+        theme_minimal()
+  )
+  
+  gg_cap_ion
+```
+
+Analiza wykresu nie pozwala stwierdzić zależności między stabilnością a użytym jonem.
+
+# Korelacje między zmiennymi
+
+```{r, echo=FALSE}
+
+cor_matrix <- cor(df_clean[numeric_columns_names])
+
+correlation_plot <- ggcorrplot(
+    cor_matrix, 
+    lab = TRUE, 
+    type = "lower", 
+    lab_size = 2,
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45)) +
+  labs(x = "", y = "")
+
+ggplotly(correlation_plot, tooltip = "text")
+
+```
+ 
+ Współczynnik korelacji zwykle uznaje się za wysoki gdy jego wartość bezwzględna przekracza 0.7. 
+ 
+ Biorąc pod uwagę opisy atrybutów, można spodziewać się silnej korelacji między parami: Gravimetric/Volumetric Capacity i Energy. Odnoszą się do podobnego pojęcia dotyczącego pojemności i gęstości energii w baterii wyrażonych względem różnych jednostek. Można również spodziewać się korelacji między gęstością i pojemnością baterii - im większa gęstość, tym większa pojemność na jednostkę masy.
+ 
+ 
+```{r, corelation_tab, echo=FALSE}
+  cor_matrix[lower.tri(cor_matrix, diag = TRUE)] <- NA
+  df_cor <- as.data.frame(as.table(cor_matrix))
+  
+  df_cor <- df_cor %>%
+    filter(!is.na(Freq), abs(Freq) >= 0.7) %>%
+    mutate(Freq = round(Freq, 3)) %>%
+    arrange(desc(abs(Freq))) %>%
+    rename('Atrybut 1' = Var1, 'Atrybut 2' = Var2, 'Współczynnik korelacji' = Freq)
+
+  knitr::kable(df_cor) %>%
+    kableExtra::kable_styling() %>%
+    kableExtra::scroll_box(width = "100%")
+```
+
+
+ Oczekiwane korelacje wystąpiły z najwyższymi wartościami współczynnika. 
+ 
+## Steps i Max Voltage Step
+ 
+ Wysoką korelację wykazały atrybuty *Steps* i *Max Voltage Step*. Możliwe że jest to spowodowane rozkładem wartości skoncentrowanym w znacznym stopniu na podobnych wartościach.
+ 
+```{r, plot_step_cor}
+
+  ggplotly(
+    ggplot(df_clean, aes(Steps,Max.Voltage.Step)) +
+      geom_point(position = position_jitter(0.2, 0.17))  +
+      geom_smooth(method="lm") + 
+      theme_minimal()
+  )
+ 
+```
+ 
+ Na wykresie można zauważyć że wysoka korelacja jest wynikiem bardzo dużej liczby instancji z parami wartości *Steps* = 1 i *Max Voltage Step* = 0, które dominują w zbiorze. Nie uznawałbym tego wyniku za znaczący.
+ 
+  
+## Atomic Fraction Charge i Discharge
+ 
+ Wysoką korelację wykazały również atrybuty *Atomic Fraction Charge* i *Atomic Fraction Discharge*. 
+ 
+```{r, plot_at_frac_chrg_dschrg_cor}
+
+  ggplotly(
+    ggplot(df_clean, aes(Atomic.Fraction.Charge, Atomic.Fraction.Discharge)) +
+      geom_point(position = position_jitter())  +
+      geom_smooth(method="lm") + 
+      theme_minimal()
+  )
+```
+ 
+ W zbiorze występuje znacząca liczba instancji z *Atomic Fraction Charge* = 0. Ten wynik można interpretować jako brak udzału atomowego składników w stanie naładowania.
+ 
+```{r corelation_frac}
+
+df_positive_afc <- df_clean %>% 
+  filter(Atomic.Fraction.Charge > 0) %>% 
+  select(Atomic.Fraction.Charge, Atomic.Fraction.Discharge)
+
+cor_chrg_dschrg <- cor_matrix["Atomic.Fraction.Charge", "Atomic.Fraction.Discharge"]
+cor_chrg_dschrg_pos <- cor(df_positive_afc)["Atomic.Fraction.Charge", "Atomic.Fraction.Discharge"]
+
+```
+Pozostałe wartości wykazują jednak silną korelację, tj. o wartości `r round(cor_chrg_dschrg_pos, 3)`, w porównaniu do ogólnej wartości korelacji tych kolumn, któa wyniosła `r round(cor_chrg_dschrg, 3)`. Można więc przyjąć, że dla *Atomic Fraction Charge* > 0, istnieje korelacja z *Atomic Fraction Discharge*.
+
+# Przewidywanie dalszych cech
+
+## Predykcja stabilności materiału
+
+Do dokonania predykcji stabilności materiału, wykorzystane zostaną następujące atrybuty:
+ - Working Ion
+ - Max Delta Volume
+ - Average Voltage
+ - Gravimetric Energy
+ - Atomic Fraction Charge
+ 
+ Zostały wybrane tak, aby nie brać pod uwagę kilku atrybutów o silnej korelacji.
+ Wykorzystany zostanie model liniowy.
+
+```{r prediction_models}
+df_x_data <- df_clean %>%
+  select(
+    Working.Ion, 
+    Max.Delta.Volume,
+    Average.Voltage, 
+    Gravimetric.Energy, 
+    Atomic.Fraction.Charge
+  )
+
+df_y_result_charge <- df_clean$Stability.Charge
+df_y_result_discharge <- df_clean$Stability.Discharge
+
+train_model <- function(x_set, y_set) {
+  set.seed(42)
+  
+  data_index <- createDataPartition(y_set, p = 0.8, list = FALSE)
+  x_train <- x_set[data_index,]
+  x_test <- x_set[-data_index,]
+  y_train <- y_set[data_index]
+  y_test <- y_set[-data_index]
+  
+  model <- lm(y_train ~ ., data = as.data.frame(x_train))  
+  list(model = model, x_train = x_train, x_test = x_test, y_train = y_train, y_test = y_test)
+}
+
+
+get_prediction_results <- function(model_list){
+  y_pred <- predict(model_list$model, newdata = as.data.frame(model_list$x_test))
+
+  df_results <- data.frame(y_pred, y_test = model_list$y_test)
+  
+  # Calculate Mean Squared Error (MSE) 
+  mse <- mean((model_list$y_test - y_pred)^2) 
+  
+  prediction_volum <- ggplot(df_results, aes(x = y_test, y = y_pred,
+                             text = paste("Actual:", round(y_test, 2), "Predicted:", round(y_pred, 2)))) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  labs(
+    x = "Actual",
+    y = "Predicted"
+  ) +
+  theme_minimal()
+
+  list(plot = ggplotly(prediction_volum, tooltip = "text"), mse = mse)
+}
+
+
+model_charge_data <- train_model(df_x_data, df_y_result_charge)
+model_discharge_data <- train_model(df_x_data, df_y_result_discharge)
+
+list_charge <- get_prediction_results(model_charge_data)
+list_discharge <- get_prediction_results(model_discharge_data)
+```
+
+### Predykcja wskaźnika stabilności materiału w stanie naładowanym
+
+```{r plot_pred_charge, echo = FALSE}
+
+
+list_charge$plot
+```
+
+MSE: `r list_charge$mse`
+
+### Predykcja wskaźnika stabilności materiału w stanie rozładowanym
+
+```{r plot_pred_discharge, echo = FALSE}
+
+list_discharge$plot
+```
+
+MSE: `r list_discharge$mse`
+
+Model liniowy nie najlepiej nadaje się do predykcji wzkaźnika stabilności materiału ze względu na stosunkowo wysoki współczynnik MSE.
+
+Można ulepszyć model dokonując normalizacji danych, dokonania bardziej restrykcyjnego usunięcia outlierów, wybór innego modelu lub innych atrybutów.
