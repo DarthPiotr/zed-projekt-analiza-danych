@@ -18,9 +18,12 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 # Podsumowanie
 
 Analiza danych dotyczących baterii wykazała, że:
+ 
  - Najpowszechniej występują baterie litowo-jonowe. Posiadają one bardzo korzystny współczynnik gęstości energetycznej do ich masy, co może przekładać się na ich popularność, gdyż mogą być stosowane w lekkich urządzeniach mobilnych.
+ 
  - Atrybuty opisujące gęstość energii i pojemność względem masy i objęctości są silnie skorelowane.
-- Model liniowy nie daje satysfakcjonujących predykcji stabilności baterii.
+ 
+ - Model liniowy nie daje satysfakcjonujących predykcji stabilności baterii.
 
 # Wykorzystane biblioteki
 
