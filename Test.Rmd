@@ -1,6 +1,6 @@
 ---
 title: "Projekt z Analizy Danych: Analiza baterii"
-subtitle: "[Repozytorium](https://google.com)"
+subtitle: "[Repozytorium](https://github.com/DarthPiotr/zed-projekt-analiza-danych)"
 author: "Piotr Marciniak"
 date: "`r Sys.Date()`"
 output:
